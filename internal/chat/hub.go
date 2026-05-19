@@ -1,7 +1,9 @@
 package chat
 
 import (
+	"fmt"
 	"log"
+	"strings"
 	"sync"
 
 	"github.com/google/uuid"
@@ -26,6 +28,18 @@ func NewHub() *Hub {
 		unregister: make(chan *Client),
 		broadcast:  make(chan *Message, 256),
 	}
+}
+
+func (h *Hub) findClientByUsername(username string) (*Client, bool) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+
+	for _, client := range h.clients {
+		if client.Username == username {
+			return client, true
+		}
+	}
+	return nil, false
 }
 
 // Run запускает основной цикл хаба
@@ -61,6 +75,26 @@ func (h *Hub) Run() {
 			close(client.Send)
 
 		case msg := <-h.broadcast:
+			if msg.Type == "get_users" {
+				h.mu.RLock()
+				var users []string
+				for _, client := range h.clients {
+					users = append(users, client.Username)
+				}
+				h.mu.RUnlock()
+
+				// Отправляем список только запросившему
+				if client, ok := h.clients[msg.FromUserID]; ok {
+					response := &Message{
+						Type:     "system",
+						ToChatID: "user:" + msg.FromUserID.String(),
+						Content:  fmt.Sprintf("Онлайн: %s", strings.Join(users, ", ")),
+					}
+					client.Send <- response
+				}
+				continue
+			}
+
 			h.mu.RLock()
 			log.Printf("Получено сообщение: type=%s, to=%s, from=%s", msg.Type, msg.ToChatID, msg.FromUsername)
 
@@ -82,8 +116,31 @@ func (h *Hub) Run() {
 					log.Printf("Комната %s не найдена", msg.ToChatID)
 				}
 			} else if IsPrivateChat(msg.ToChatID) {
-				// личные сообщения (добавлю позже)
-				log.Printf("Личное сообщение для %s (пока не реализовано)", msg.ToChatID)
+				// msg.ToChatID = "user:username" (например "user:alice")
+				username := msg.ToChatID[5:] // убираем "user:"
+
+				// Ищем клиента по username
+				targetClient, found := h.findClientByUsername(username)
+
+				if found {
+					select {
+					case targetClient.Send <- msg:
+						log.Printf("Личное сообщение отправлено пользователю %s", username)
+					default:
+						log.Printf("Получатель %s недоступен", username)
+					}
+				} else {
+					log.Printf("Пользователь %s не в сети", username)
+					// Отправляем отправителю уведомление
+					if sender, ok := h.clients[msg.FromUserID]; ok {
+						errorMsg := &Message{
+							Type:     "system",
+							ToChatID: "user:" + sender.Username,
+							Content:  fmt.Sprintf("Пользователь %s не в сети", username),
+						}
+						sender.Send <- errorMsg
+					}
+				}
 			}
 
 			h.mu.RUnlock()

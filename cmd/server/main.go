@@ -20,9 +20,14 @@ func main() {
 
 	// WebSocket endpoint (временно без JWT)
 	http.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
-		// временно: заглушка для пользователя
+		// Получаем username из query параметра
+		username := r.URL.Query().Get("username")
+		if username == "" {
+			// Если не указан, генерируем случайный
+			username = "user_" + uuid.New().String()[:8]
+		}
+
 		userID := uuid.New()
-		username := "user_" + userID.String()[:8]
 
 		log.Printf("Новое подключение: %s (%s)", username, userID)
 		chat.ServeWs(hub, w, r, userID, username)
