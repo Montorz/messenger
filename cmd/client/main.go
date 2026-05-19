@@ -2,14 +2,24 @@ package main
 
 import (
 	"bufio"
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"strings"
 
-	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 )
+
+type AuthResponse struct {
+	Token string `json:"token"`
+	User  struct {
+		ID       string `json:"id"`
+		Username string `json:"username"`
+	} `json:"user"`
+}
 
 type Message struct {
 	Type         string `json:"type"`
@@ -22,17 +32,49 @@ type Message struct {
 func main() {
 	log.SetFlags(log.Ltime | log.Lmicroseconds)
 
-	// Запрашиваем имя пользователя
-	fmt.Print("Введите ваше имя: ")
+	fmt.Println("Мессенджер")
+	fmt.Println("1. Вход")
+	fmt.Println("2. Регистрация")
+	fmt.Print("Выберите опцию: ")
+
 	scanner := bufio.NewScanner(os.Stdin)
 	scanner.Scan()
-	username := scanner.Text()
-	if username == "" {
-		username = "anon_" + uuid.New().String()[:8]
+	option := scanner.Text()
+
+	var token, username string
+
+	if option == "1" {
+		// Логин
+		fmt.Print("Имя пользователя: ")
+		scanner.Scan()
+		username = scanner.Text()
+
+		fmt.Print("Пароль: ")
+		scanner.Scan()
+		password := scanner.Text()
+
+		token = login(username, password)
+		if token == "" {
+			log.Fatal("Ошибка входа")
+		}
+	} else {
+		// Регистрация
+		fmt.Print("Имя пользователя: ")
+		scanner.Scan()
+		username = scanner.Text()
+
+		fmt.Print("Пароль: ")
+		scanner.Scan()
+		password := scanner.Text()
+
+		token = register(username, password)
+		if token == "" {
+			log.Fatal("Ошибка регистрации")
+		}
 	}
 
-	// Подключаемся с указанным username
-	url := fmt.Sprintf("ws://localhost:8080/ws?username=%s", username)
+	// Подключаемся к WebSocket с токеном
+	url := fmt.Sprintf("ws://localhost:8080/ws?token=%s", token)
 	log.Printf("Подключение к %s...", url)
 
 	conn, _, err := websocket.DefaultDialer.Dial(url, nil)
@@ -50,7 +92,7 @@ func main() {
 	fmt.Println("  /exit                    - выход")
 	fmt.Println()
 
-	// горутина для получения сообщений
+	// Горутина для получения сообщений
 	go func() {
 		for {
 			var msg Message
@@ -59,22 +101,19 @@ func main() {
 				return
 			}
 
-			// Форматируем вывод в зависимости от типа сообщения
 			if strings.HasPrefix(msg.ToChatID, "user:") {
-				// Личное сообщение
 				fmt.Printf("\n[ЛИЧНОЕ] от %s: %s\n", msg.FromUsername, msg.Content)
 			} else {
-				// Групповое сообщение
 				fmt.Printf("\n[%s] %s: %s\n", msg.ToChatID, msg.FromUsername, msg.Content)
 			}
 			fmt.Print("> ")
 		}
 	}()
 
-	// отправка сообщений
-	scanner = bufio.NewScanner(os.Stdin)
-	for scanner.Scan() {
-		text := scanner.Text()
+	// Отправка сообщений
+	inputScanner := bufio.NewScanner(os.Stdin)
+	for inputScanner.Scan() {
+		text := inputScanner.Text()
 
 		if text == "/exit" {
 			log.Println("Выход...")
@@ -82,17 +121,12 @@ func main() {
 		}
 
 		if text == "/users" {
-			// Запрашиваем список пользователей
-			msg := Message{
-				Type:     "get_users",
-				ToChatID: "system",
-			}
+			msg := Message{Type: "get_users", ToChatID: "system"}
 			conn.WriteJSON(msg)
 			continue
 		}
 
 		if strings.HasPrefix(text, "/msg ") {
-			// Парсим: /msg username привет как дела
 			parts := strings.SplitN(text[5:], " ", 2)
 			if len(parts) != 2 {
 				fmt.Println("Использование: /msg <username> <текст>")
@@ -100,19 +134,14 @@ func main() {
 				continue
 			}
 
-			username := parts[0]
-			content := parts[1]
-
 			msg := Message{
 				Type:     "private",
-				ToChatID: "user:" + username, // теперь user:username
-				Content:  content,
+				ToChatID: "user:" + parts[0],
+				Content:  parts[1],
 			}
-			if err := conn.WriteJSON(msg); err != nil {
-				log.Println("Ошибка отправки:", err)
-			} else {
-				log.Printf("Личное сообщение отправлено пользователю %s", username)
-			}
+			conn.WriteJSON(msg)
+			log.Printf("Личное сообщение отправлено пользователю %s", parts[0])
+
 		} else if strings.HasPrefix(text, "/group ") {
 			content := strings.TrimPrefix(text, "/group ")
 			msg := Message{
@@ -120,15 +149,56 @@ func main() {
 				ToChatID: "group:general",
 				Content:  content,
 			}
-			if err := conn.WriteJSON(msg); err != nil {
-				log.Println("Ошибка отправки:", err)
-			} else {
-				log.Println("Сообщение в группу отправлено")
-			}
+			conn.WriteJSON(msg)
+			log.Println("Сообщение в группу отправлено")
+
 		} else {
 			fmt.Println("Неизвестная команда")
-			fmt.Println("Доступно: /msg, /group, /users, /exit")
 			fmt.Print("> ")
 		}
 	}
+}
+
+func register(username, password string) string {
+	data := map[string]string{"username": username, "password": password}
+	jsonData, _ := json.Marshal(data)
+
+	resp, err := http.Post("http://localhost:8080/api/register", "application/json", bytes.NewBuffer(jsonData))
+	if err != nil {
+		log.Println("Ошибка регистрации:", err)
+		return ""
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		log.Println("Ошибка регистрации:", resp.Status)
+		return ""
+	}
+
+	var authResp AuthResponse
+	json.NewDecoder(resp.Body).Decode(&authResp)
+	log.Printf("Регистрация успешна! Добро пожаловать, %s", username)
+	return authResp.Token
+}
+
+func login(username, password string) string {
+	data := map[string]string{"username": username, "password": password}
+	jsonData, _ := json.Marshal(data)
+
+	resp, err := http.Post("http://localhost:8080/api/login", "application/json", bytes.NewBuffer(jsonData))
+	if err != nil {
+		log.Println("Ошибка входа:", err)
+		return ""
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		log.Println("Ошибка входа:", resp.Status)
+		return ""
+	}
+
+	var authResp AuthResponse
+	json.NewDecoder(resp.Body).Decode(&authResp)
+	log.Printf("Вход выполнен! Добро пожаловать, %s", username)
+	return authResp.Token
 }
