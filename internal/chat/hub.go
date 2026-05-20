@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/Montorz/messenger/internal/storage"
+	"github.com/Montorz/messenger/pkg/logger"
 	"github.com/google/uuid"
 )
 
@@ -18,11 +19,12 @@ type Hub struct {
 	unregister chan *Client
 	broadcast  chan *Message
 	mu         sync.RWMutex
-	db         *storage.DB // добавляем БД
+	db         *storage.DB
+	logger     *logger.Logger
 }
 
-// NewHub создаёт новый хаб с БД
-func NewHub(db *storage.DB) *Hub {
+// NewHub создаёт новый хаб с БД и логгером
+func NewHub(db *storage.DB, log *logger.Logger) *Hub {
 	return &Hub{
 		clients:    make(map[uuid.UUID]*Client),
 		rooms:      make(map[string]map[uuid.UUID]*Client),
@@ -30,6 +32,7 @@ func NewHub(db *storage.DB) *Hub {
 		unregister: make(chan *Client),
 		broadcast:  make(chan *Message, 256),
 		db:         db,
+		logger:     log,
 	}
 }
 

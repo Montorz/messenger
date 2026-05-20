@@ -11,25 +11,37 @@ import (
 	"github.com/Montorz/messenger/internal/auth"
 	"github.com/Montorz/messenger/internal/chat"
 	"github.com/Montorz/messenger/internal/storage"
+	"github.com/Montorz/messenger/pkg/logger"
 	"github.com/google/uuid"
 )
 
 var db *storage.DB
 var hub *chat.Hub
+var appLogger *logger.Logger
 
 func main() {
-	log.SetFlags(log.LstdFlags | log.Lshortfile)
+	// Создаём логгер
+	var err error
+	appLogger, err = logger.NewLogger("./logs")
+	if err != nil {
+		log.Fatal("Ошибка создания логгера:", err)
+	}
+	defer appLogger.Close()
+
+	appLogger.LogServerAction("Запуск сервера...")
 
 	// Инициализируем БД
-	var err error
 	db, err = storage.NewDB("./messenger.db")
 	if err != nil {
+		appLogger.LogError("Подключение к БД", err)
 		log.Fatal("Ошибка подключения к БД:", err)
 	}
 	defer db.Close()
 
-	// Создаём хаб с передачей БД
-	hub = chat.NewHub(db) //  передаём БД
+	appLogger.Info("База данных подключена")
+
+	// Создаём хаб с передачей БД и логгера
+	hub = chat.NewHub(db, appLogger)
 	go hub.Run()
 
 	// REST API endpoints
@@ -41,11 +53,12 @@ func main() {
 	server := &http.Server{Addr: ":8080", Handler: nil}
 
 	go func() {
-		log.Println("Сервер запущен на http://localhost:8080")
-		log.Println("Регистрация: POST /api/register")
-		log.Println("Логин: POST /api/login")
-		log.Println("WebSocket: ws://localhost:8080/ws?token=<jwt>")
+		appLogger.LogServerAction("Сервер запущен на http://localhost:8080")
+		appLogger.Info("Регистрация: POST /api/register")
+		appLogger.Info("Логин: POST /api/login")
+		appLogger.Info("WebSocket: ws://localhost:8080/ws?token=<jwt>")
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			appLogger.LogError("Запуск сервера", err)
 			log.Fatal("Ошибка сервера:", err)
 		}
 	}()
@@ -55,11 +68,12 @@ func main() {
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 	<-sigChan
 
-	log.Println("Выключение сервера...")
+	appLogger.LogServerAction("Получен сигнал завершения, выключение...")
+	appLogger.Info("Остановка сервера...")
 	server.Close()
+	appLogger.LogServerAction("Сервер остановлен")
 }
 
-// handleRegister обрабатывает регистрацию
 func handleRegister(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -76,19 +90,21 @@ func handleRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Создаём пользователя
 	user, err := db.CreateUser(req.Username, req.Password)
 	if err != nil {
+		appLogger.LogError("Регистрация пользователя "+req.Username, err)
 		http.Error(w, "Username already exists", http.StatusConflict)
 		return
 	}
 
-	// Генерируем токен
 	token, err := auth.GenerateToken(user.ID, user.Username)
 	if err != nil {
+		appLogger.LogError("Генерация токена", err)
 		http.Error(w, "Internal error", http.StatusInternalServerError)
 		return
 	}
+
+	appLogger.LogUserAction(user.Username, "регистрация")
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
@@ -100,7 +116,6 @@ func handleRegister(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleLogin обрабатывает вход
 func handleLogin(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -117,22 +132,22 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Проверяем пользователя и пароль
 	user, err := db.CheckPassword(req.Username, req.Password)
 	if err != nil {
+		appLogger.LogError("Вход пользователя "+req.Username, err)
 		http.Error(w, "Invalid credentials", http.StatusUnauthorized)
 		return
 	}
 
-	// Генерируем токен
 	token, err := auth.GenerateToken(user.ID, user.Username)
 	if err != nil {
+		appLogger.LogError("Генерация токена", err)
 		http.Error(w, "Internal error", http.StatusInternalServerError)
 		return
 	}
 
-	// Обновляем last_seen
 	db.UpdateLastSeen(user.ID)
+	appLogger.LogUserAction(user.Username, "вход в систему")
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
@@ -144,7 +159,6 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleWebSocket обрабатывает WebSocket подключения с JWT
 func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	token := r.URL.Query().Get("token")
 	if token == "" {
@@ -152,9 +166,9 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Проверяем токен
 	claims, err := auth.ValidateToken(token)
 	if err != nil {
+		appLogger.LogError("WebSocket аутентификация", err)
 		http.Error(w, "Invalid token", http.StatusUnauthorized)
 		return
 	}
@@ -165,9 +179,8 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Обновляем last_seen
 	db.UpdateLastSeen(userID)
+	appLogger.LogUserAction(claims.Username, "WebSocket подключение")
 
-	log.Printf("WebSocket подключение: %s (%s)", claims.Username, userID)
 	chat.ServeWs(hub, w, r, userID, claims.Username)
 }
