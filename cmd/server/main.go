@@ -28,8 +28,8 @@ func main() {
 	}
 	defer db.Close()
 
-	// Создаём хаб
-	hub = chat.NewHub()
+	// Создаём хаб с передачей БД
+	hub = chat.NewHub(db) //  передаём БД
 	go hub.Run()
 
 	// REST API endpoints
@@ -50,7 +50,7 @@ func main() {
 		}
 	}()
 
-	// shutdown
+	// Graceful shutdown
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 	<-sigChan

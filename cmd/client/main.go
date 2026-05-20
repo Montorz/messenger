@@ -44,7 +44,6 @@ func main() {
 	var token, username string
 
 	if option == "1" {
-		// Логин
 		fmt.Print("Имя пользователя: ")
 		scanner.Scan()
 		username = scanner.Text()
@@ -58,7 +57,6 @@ func main() {
 			log.Fatal("Ошибка входа")
 		}
 	} else {
-		// Регистрация
 		fmt.Print("Имя пользователя: ")
 		scanner.Scan()
 		username = scanner.Text()
@@ -92,20 +90,27 @@ func main() {
 	fmt.Println("  /exit                    - выход")
 	fmt.Println()
 
+	fmt.Print("> ")
+
 	// Горутина для получения сообщений
 	go func() {
 		for {
 			var msg Message
 			if err := conn.ReadJSON(&msg); err != nil {
-				log.Println("Соединение разорвано")
+				log.Printf("\nОшибка чтения: %v", err)
 				return
 			}
 
-			if strings.HasPrefix(msg.ToChatID, "user:") {
-				fmt.Printf("\n[ЛИЧНОЕ] от %s: %s\n", msg.FromUsername, msg.Content)
+			fmt.Print("\r\033[K")
+
+			if msg.Type == "system" {
+				fmt.Printf("%s\n", msg.Content)
+			} else if strings.HasPrefix(msg.ToChatID, "user:") {
+				fmt.Printf("[ЛИЧНОЕ] от %s: %s\n", msg.FromUsername, msg.Content)
 			} else {
-				fmt.Printf("\n[%s] %s: %s\n", msg.ToChatID, msg.FromUsername, msg.Content)
+				fmt.Printf("[%s] %s: %s\n", msg.ToChatID, msg.FromUsername, msg.Content)
 			}
+
 			fmt.Print("> ")
 		}
 	}()
@@ -113,7 +118,7 @@ func main() {
 	// Отправка сообщений
 	inputScanner := bufio.NewScanner(os.Stdin)
 	for inputScanner.Scan() {
-		text := inputScanner.Text()
+		text := strings.TrimSpace(inputScanner.Text())
 
 		if text == "/exit" {
 			log.Println("Выход...")
@@ -121,8 +126,15 @@ func main() {
 		}
 
 		if text == "/users" {
-			msg := Message{Type: "get_users", ToChatID: "system"}
-			conn.WriteJSON(msg)
+			msg := Message{
+				Type:     "get_users",
+				ToChatID: "system",
+			}
+			log.Printf("Отправляем /users запрос")
+			if err := conn.WriteJSON(msg); err != nil {
+				log.Println("Ошибка отправки:", err)
+			}
+			fmt.Print("> ")
 			continue
 		}
 
@@ -139,21 +151,36 @@ func main() {
 				ToChatID: "user:" + parts[0],
 				Content:  parts[1],
 			}
-			conn.WriteJSON(msg)
-			log.Printf("Личное сообщение отправлено пользователю %s", parts[0])
+			if err := conn.WriteJSON(msg); err != nil {
+				log.Println("Ошибка отправки:", err)
+			} else {
+				log.Printf("Личное сообщение отправлено пользователю %s", parts[0])
+			}
+			fmt.Print("> ")
+			continue
+		}
 
-		} else if strings.HasPrefix(text, "/group ") {
+		if strings.HasPrefix(text, "/group ") {
 			content := strings.TrimPrefix(text, "/group ")
 			msg := Message{
 				Type:     "group",
 				ToChatID: "group:general",
 				Content:  content,
 			}
-			conn.WriteJSON(msg)
-			log.Println("Сообщение в группу отправлено")
+			if err := conn.WriteJSON(msg); err != nil {
+				log.Println("Ошибка отправки:", err)
+			} else {
+				log.Println("Сообщение в группу отправлено")
+			}
+			fmt.Print("> ")
+			continue
+		}
 
+		if text != "" {
+			fmt.Println("Неизвестная команда:", text)
+			fmt.Println("Доступно: /msg, /group, /users, /exit")
+			fmt.Print("> ")
 		} else {
-			fmt.Println("Неизвестная команда")
 			fmt.Print("> ")
 		}
 	}

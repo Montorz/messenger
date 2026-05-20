@@ -40,6 +40,7 @@ func (c *Client) readPump() {
 			break
 		}
 
+		// Заполняем отправителя из контекста клиента
 		msg.FromUserID = c.UserID
 		msg.FromUsername = c.Username
 		msg.CreatedAt = time.Now()

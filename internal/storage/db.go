@@ -162,23 +162,31 @@ func (db *DB) UpdateLastSeen(userID uuid.UUID) error {
 }
 
 // SaveMessage сохраняет сообщение в БД
-func (db *DB) SaveMessage(msgID uuid.UUID, fromUserID uuid.UUID, toChatID, content string, replyToID *uuid.UUID) error {
+func (db *DB) SaveMessage(fromUserID uuid.UUID, toChatID, content string, replyToID *uuid.UUID) error {
+	id := uuid.New()
+
 	var replyIDStr interface{}
 	if replyToID != nil {
 		replyIDStr = replyToID.String()
 	}
 
 	_, err := db.conn.Exec(
-		"INSERT INTO messages (id, from_user_id, to_chat_id, content, reply_to_id) VALUES (?, ?, ?, ?, ?)",
-		msgID.String(), fromUserID.String(), toChatID, content, replyIDStr,
+		"INSERT INTO messages (id, from_user_id, to_chat_id, content, reply_to_id, created_at) VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)",
+		id.String(), fromUserID.String(), toChatID, content, replyIDStr,
 	)
-	return err
+	if err != nil {
+		log.Printf("Ошибка сохранения сообщения: %v", err)
+		return err
+	}
+
+	log.Printf("💾 Сообщение сохранено в БД: %s -> %s", fromUserID.String()[:8], toChatID)
+	return nil
 }
 
 // GetChatHistory получает историю чата (последние 50 сообщений)
 func (db *DB) GetChatHistory(chatID string, limit int) ([]map[string]interface{}, error) {
 	rows, err := db.conn.Query(`
-        SELECT m.id, m.content, m.created_at, u.username as from_username
+        SELECT m.id, m.content, m.created_at, u.username as from_username, m.from_user_id
         FROM messages m
         JOIN users u ON m.from_user_id = u.id
         WHERE m.to_chat_id = ?
@@ -193,19 +201,22 @@ func (db *DB) GetChatHistory(chatID string, limit int) ([]map[string]interface{}
 
 	var messages []map[string]interface{}
 	for rows.Next() {
-		var id, content, fromUsername string
+		var id, content, fromUsername, fromUserID string
 		var createdAt time.Time
 
-		if err := rows.Scan(&id, &content, &createdAt, &fromUsername); err != nil {
+		if err := rows.Scan(&id, &content, &createdAt, &fromUsername, &fromUserID); err != nil {
 			continue
 		}
 
-		messages = append(messages, map[string]interface{}{
-			"id":            id,
-			"content":       content,
-			"from_username": fromUsername,
-			"created_at":    createdAt,
-		})
+		messages = append([]map[string]interface{}{ // добавляем в начало (чтобы были в хронологическом порядке)
+			{
+				"id":            id,
+				"content":       content,
+				"from_username": fromUsername,
+				"from_user_id":  fromUserID,
+				"created_at":    createdAt,
+			},
+		}, messages...)
 	}
 
 	return messages, nil
