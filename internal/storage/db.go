@@ -10,41 +10,43 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-// User представляет пользователя в системе
 type User struct {
-	ID        uuid.UUID `json:"id"`
-	Username  string    `json:"username"`
-	Password  string    `json:"-"` // не отправляем в JSON
-	CreatedAt time.Time `json:"created_at"`
-	LastSeen  time.Time `json:"last_seen"`
+	ID        uuid.UUID
+	Username  string
+	Password  string
+	CreatedAt time.Time
+	LastSeen  time.Time
 }
 
-// DB обёртка над sql.DB
+type Room struct {
+	ID        string    `json:"id"`
+	Name      string    `json:"name"`
+	CreatedBy string    `json:"created_by"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
 type DB struct {
 	conn *sql.DB
 }
 
-// NewDB создаёт новое подключение к БД
 func NewDB(dbPath string) (*DB, error) {
-	conn, err := sql.Open("sqlite", dbPath+"?_pragma=foreign_keys(1)")
+	conn, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		return nil, err
 	}
 
-	// Проверяем подключение
 	if err := conn.Ping(); err != nil {
 		return nil, err
 	}
 
-	// Создаём таблицы
 	if err := createTables(conn); err != nil {
 		return nil, err
 	}
 
+	log.Println("Подключение к SQLite установлено")
 	return &DB{conn: conn}, nil
 }
 
-// createTables создаёт необходимые таблицы
 func createTables(conn *sql.DB) error {
 	queries := []string{
 		`CREATE TABLE IF NOT EXISTS users (
@@ -54,8 +56,21 @@ func createTables(conn *sql.DB) error {
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             last_seen DATETIME DEFAULT CURRENT_TIMESTAMP
         )`,
-		`CREATE INDEX IF NOT EXISTS idx_users_username ON users(username)`,
-
+		`CREATE TABLE IF NOT EXISTS rooms (
+            id TEXT PRIMARY KEY,
+            name TEXT UNIQUE NOT NULL,
+            created_by TEXT NOT NULL,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (created_by) REFERENCES users(username)
+        )`,
+		`CREATE TABLE IF NOT EXISTS room_members (
+            room_id TEXT NOT NULL,
+            username TEXT NOT NULL,
+            joined_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (room_id, username),
+            FOREIGN KEY (room_id) REFERENCES rooms(id),
+            FOREIGN KEY (username) REFERENCES users(username)
+        )`,
 		`CREATE TABLE IF NOT EXISTS messages (
             id TEXT PRIMARY KEY,
             from_user_id TEXT NOT NULL,
@@ -68,21 +83,20 @@ func createTables(conn *sql.DB) error {
         )`,
 		`CREATE INDEX IF NOT EXISTS idx_messages_to_chat_id ON messages(to_chat_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_messages_created_at ON messages(created_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_room_members_username ON room_members(username)`,
 	}
 
 	for _, query := range queries {
 		if _, err := conn.Exec(query); err != nil {
+			log.Printf("Ошибка создания таблицы: %v", err)
 			return err
 		}
 	}
-
 	log.Println("Таблицы БД созданы/проверены")
 	return nil
 }
 
-// CreateUser создаёт нового пользователя
 func (db *DB) CreateUser(username, password string) (*User, error) {
-	// Хешируем пароль
 	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
 	if err != nil {
 		return nil, err
@@ -104,11 +118,10 @@ func (db *DB) CreateUser(username, password string) (*User, error) {
 		return nil, err
 	}
 
-	log.Printf("Создан пользователь: %s (%s)", username, user.ID)
+	log.Printf("Создан пользователь: %s", username)
 	return user, nil
 }
 
-// GetUserByUsername получает пользователя по имени
 func (db *DB) GetUserByUsername(username string) (*User, error) {
 	var user User
 	var idStr string
@@ -123,36 +136,23 @@ func (db *DB) GetUserByUsername(username string) (*User, error) {
 	}
 
 	user.ID, err = uuid.Parse(idStr)
-	if err != nil {
-		return nil, err
-	}
-
-	return &user, nil
+	return &user, err
 }
 
-// GetUserByID получает пользователя по ID
-func (db *DB) GetUserByID(id uuid.UUID) (*User, error) {
-	var user User
-	var idStr string
-
-	err := db.conn.QueryRow(
-		"SELECT id, username, password, created_at, last_seen FROM users WHERE id = ?",
-		id.String(),
-	).Scan(&idStr, &user.Username, &user.Password, &user.CreatedAt, &user.LastSeen)
-
+func (db *DB) CheckPassword(username, password string) (*User, error) {
+	user, err := db.GetUserByUsername(username)
 	if err != nil {
 		return nil, err
 	}
 
-	user.ID, err = uuid.Parse(idStr)
+	err = bcrypt.CompareHashAndPassword([]byte(user.Password), []byte(password))
 	if err != nil {
 		return nil, err
 	}
 
-	return &user, nil
+	return user, nil
 }
 
-// UpdateLastSeen обновляет время последнего визита
 func (db *DB) UpdateLastSeen(userID uuid.UUID) error {
 	_, err := db.conn.Exec(
 		"UPDATE users SET last_seen = CURRENT_TIMESTAMP WHERE id = ?",
@@ -161,7 +161,6 @@ func (db *DB) UpdateLastSeen(userID uuid.UUID) error {
 	return err
 }
 
-// SaveMessage сохраняет сообщение в БД
 func (db *DB) SaveMessage(fromUserID uuid.UUID, toChatID, content string, replyToID *uuid.UUID) error {
 	id := uuid.New()
 
@@ -179,11 +178,10 @@ func (db *DB) SaveMessage(fromUserID uuid.UUID, toChatID, content string, replyT
 		return err
 	}
 
-	log.Printf("💾 Сообщение сохранено в БД: %s -> %s", fromUserID.String()[:8], toChatID)
+	log.Printf("Сообщение сохранено в БД: %s -> %s", fromUserID.String()[:8], toChatID)
 	return nil
 }
 
-// GetChatHistory получает историю чата (последние 50 сообщений)
 func (db *DB) GetChatHistory(chatID string, limit int) ([]map[string]interface{}, error) {
 	rows, err := db.conn.Query(`
         SELECT m.id, m.content, m.created_at, u.username as from_username, m.from_user_id
@@ -208,7 +206,7 @@ func (db *DB) GetChatHistory(chatID string, limit int) ([]map[string]interface{}
 			continue
 		}
 
-		messages = append([]map[string]interface{}{ // добавляем в начало (чтобы были в хронологическом порядке)
+		messages = append([]map[string]interface{}{
 			{
 				"id":            id,
 				"content":       content,
@@ -222,24 +220,116 @@ func (db *DB) GetChatHistory(chatID string, limit int) ([]map[string]interface{}
 	return messages, nil
 }
 
-// CheckPassword проверяет пароль пользователя
-func (db *DB) CheckPassword(username, password string) (*User, error) {
-	// Получаем пользователя
-	user, err := db.GetUserByUsername(username)
+// CreateRoom создаёт новую комнату
+func (db *DB) CreateRoom(roomName, createdBy string) error {
+	roomID := "room:" + roomName
+
+	_, err := db.conn.Exec(
+		"INSERT INTO rooms (id, name, created_by) VALUES (?, ?, ?)",
+		roomID, roomName, createdBy,
+	)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
-	// Сравниваем пароль с хешем
-	err = bcrypt.CompareHashAndPassword([]byte(user.Password), []byte(password))
-	if err != nil {
-		return nil, err
-	}
-
-	return user, nil
+	// Добавляем создателя в комнату
+	_, err = db.conn.Exec(
+		"INSERT INTO room_members (room_id, username) VALUES (?, ?)",
+		roomID, createdBy,
+	)
+	return err
 }
 
-// Close закрывает соединение с БД
+// JoinRoom добавляет пользователя в комнату
+func (db *DB) JoinRoom(roomName, username string) error {
+	roomID := "room:" + roomName
+
+	// Проверяем существует ли комната
+	var exists bool
+	err := db.conn.QueryRow("SELECT EXISTS(SELECT 1 FROM rooms WHERE name = ?)", roomName).Scan(&exists)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return sql.ErrNoRows
+	}
+
+	// Добавляем пользователя
+	_, err = db.conn.Exec(
+		"INSERT OR IGNORE INTO room_members (room_id, username) VALUES (?, ?)",
+		roomID, username,
+	)
+	return err
+}
+
+// LeaveRoom удаляет пользователя из комнаты
+func (db *DB) LeaveRoom(roomName, username string) error {
+	roomID := "room:" + roomName
+
+	_, err := db.conn.Exec(
+		"DELETE FROM room_members WHERE room_id = ? AND username = ?",
+		roomID, username,
+	)
+	return err
+}
+
+// GetAllRooms возвращает ВСЕ существующие комнаты (для списка доступных)
+func (db *DB) GetAllRooms() ([]Room, error) {
+	rows, err := db.conn.Query(`
+        SELECT id, name, created_by, created_at FROM rooms ORDER BY name
+    `)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var rooms []Room
+	for rows.Next() {
+		var room Room
+		if err := rows.Scan(&room.ID, &room.Name, &room.CreatedBy, &room.CreatedAt); err != nil {
+			continue
+		}
+		rooms = append(rooms, room)
+	}
+	return rooms, nil
+}
+
+// GetUserRooms возвращает комнаты, в которых состоит пользователь
+func (db *DB) GetUserRooms(username string) ([]Room, error) {
+	rows, err := db.conn.Query(`
+        SELECT r.id, r.name, r.created_by, r.created_at
+        FROM rooms r
+        JOIN room_members rm ON r.id = rm.room_id
+        WHERE rm.username = ?
+        ORDER BY r.name
+    `, username)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var rooms []Room
+	for rows.Next() {
+		var room Room
+		if err := rows.Scan(&room.ID, &room.Name, &room.CreatedBy, &room.CreatedAt); err != nil {
+			continue
+		}
+		rooms = append(rooms, room)
+	}
+	return rooms, nil
+}
+
+// IsRoomMember проверяет, состоит ли пользователь в комнате
+func (db *DB) IsRoomMember(roomName, username string) (bool, error) {
+	roomID := "room:" + roomName
+	var exists bool
+	err := db.conn.QueryRow(
+		"SELECT EXISTS(SELECT 1 FROM room_members WHERE room_id = ? AND username = ?)",
+		roomID, username,
+	).Scan(&exists)
+	return exists, err
+}
+
 func (db *DB) Close() error {
 	return db.conn.Close()
 }

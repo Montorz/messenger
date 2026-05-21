@@ -71,9 +71,8 @@ func main() {
 		}
 	}
 
-	// Подключаемся к WebSocket с токеном
 	url := fmt.Sprintf("ws://localhost:8080/ws?token=%s", token)
-	log.Printf("Подключение к %s...", url)
+	log.Printf("Подключение...")
 
 	conn, _, err := websocket.DefaultDialer.Dial(url, nil)
 	if err != nil {
@@ -83,22 +82,27 @@ func main() {
 
 	log.Printf("Добро пожаловать, %s!", username)
 
-	fmt.Println("\nКоманды:")
-	fmt.Println("  /msg <username> <текст> - личное сообщение")
-	fmt.Println("  /group <текст>           - сообщение в общий чат")
-	fmt.Println("  /users                   - список онлайн")
-	fmt.Println("  /exit                    - выход")
+	fmt.Println("\nКОМАНДЫ:")
+	fmt.Println("  просто текст         - отправить сообщение в текущую комнату")
+	fmt.Println("  /create <название>   - создать новую комнату и войти в неё")
+	fmt.Println("  /join <название>     - войти в комнату")
+	fmt.Println("  /leave <название>    - выйти из комнаты")
+	fmt.Println("  /rooms               - список всех доступных комнат")
+	fmt.Println("  /room                - показать текущую комнату")
+	fmt.Println("  /msg <user> <текст>  - личное сообщение")
+	fmt.Println("  /users               - список онлайн")
+	fmt.Println("  /exit                - выход")
 	fmt.Println()
 
+	fmt.Println("Вы не в комнате. Используйте /join <название> или /create <название>")
 	fmt.Print("> ")
 
-	// Горутина для получения сообщений
 	go func() {
 		for {
 			var msg Message
 			if err := conn.ReadJSON(&msg); err != nil {
-				log.Printf("\nОшибка чтения: %v", err)
-				return
+				log.Printf("\nСоединение разорвано")
+				os.Exit(0)
 			}
 
 			fmt.Print("\r\033[K")
@@ -107,15 +111,15 @@ func main() {
 				fmt.Printf("%s\n", msg.Content)
 			} else if strings.HasPrefix(msg.ToChatID, "user:") {
 				fmt.Printf("[ЛИЧНОЕ] от %s: %s\n", msg.FromUsername, msg.Content)
-			} else {
-				fmt.Printf("[%s] %s: %s\n", msg.ToChatID, msg.FromUsername, msg.Content)
+			} else if strings.HasPrefix(msg.ToChatID, "room:") {
+				roomName := strings.TrimPrefix(msg.ToChatID, "room:")
+				fmt.Printf("[%s] %s: %s\n", roomName, msg.FromUsername, msg.Content)
 			}
 
 			fmt.Print("> ")
 		}
 	}()
 
-	// Отправка сообщений
 	inputScanner := bufio.NewScanner(os.Stdin)
 	for inputScanner.Scan() {
 		text := strings.TrimSpace(inputScanner.Text())
@@ -126,14 +130,40 @@ func main() {
 		}
 
 		if text == "/users" {
-			msg := Message{
-				Type:     "get_users",
-				ToChatID: "system",
-			}
-			log.Printf("Отправляем /users запрос")
-			if err := conn.WriteJSON(msg); err != nil {
-				log.Println("Ошибка отправки:", err)
-			}
+			conn.WriteJSON(Message{Type: "get_users", ToChatID: "system"})
+			fmt.Print("> ")
+			continue
+		}
+
+		if text == "/rooms" {
+			conn.WriteJSON(Message{Type: "list_rooms", ToChatID: "system"})
+			fmt.Print("> ")
+			continue
+		}
+
+		if text == "/room" {
+			conn.WriteJSON(Message{Type: "current_room", ToChatID: "system"})
+			fmt.Print("> ")
+			continue
+		}
+
+		if strings.HasPrefix(text, "/create ") {
+			roomName := strings.TrimPrefix(text, "/create ")
+			conn.WriteJSON(Message{Type: "create_room", ToChatID: "system", Content: roomName})
+			fmt.Print("> ")
+			continue
+		}
+
+		if strings.HasPrefix(text, "/join ") {
+			roomName := strings.TrimPrefix(text, "/join ")
+			conn.WriteJSON(Message{Type: "join_room", ToChatID: "system", Content: roomName})
+			fmt.Print("> ")
+			continue
+		}
+
+		if strings.HasPrefix(text, "/leave ") {
+			roomName := strings.TrimPrefix(text, "/leave ")
+			conn.WriteJSON(Message{Type: "leave_room", ToChatID: "system", Content: roomName})
 			fmt.Print("> ")
 			continue
 		}
@@ -145,40 +175,17 @@ func main() {
 				fmt.Print("> ")
 				continue
 			}
-
-			msg := Message{
-				Type:     "private",
-				ToChatID: "user:" + parts[0],
-				Content:  parts[1],
-			}
-			if err := conn.WriteJSON(msg); err != nil {
-				log.Println("Ошибка отправки:", err)
-			} else {
-				log.Printf("Личное сообщение отправлено пользователю %s", parts[0])
-			}
+			conn.WriteJSON(Message{Type: "private", ToChatID: "user:" + parts[0], Content: parts[1]})
 			fmt.Print("> ")
 			continue
 		}
 
-		if strings.HasPrefix(text, "/group ") {
-			content := strings.TrimPrefix(text, "/group ")
-			msg := Message{
-				Type:     "group",
-				ToChatID: "group:general",
-				Content:  content,
-			}
-			if err := conn.WriteJSON(msg); err != nil {
-				log.Println("Ошибка отправки:", err)
-			} else {
-				log.Println("Сообщение в группу отправлено")
-			}
+		if text != "" && !strings.HasPrefix(text, "/") {
+			// Обычный текст - отправляем в текущую комнату
+			conn.WriteJSON(Message{Type: "group", ToChatID: "", Content: text})
 			fmt.Print("> ")
-			continue
-		}
-
-		if text != "" {
-			fmt.Println("Неизвестная команда:", text)
-			fmt.Println("Доступно: /msg, /group, /users, /exit")
+		} else if text != "" {
+			fmt.Println("Неизвестная команда")
 			fmt.Print("> ")
 		} else {
 			fmt.Print("> ")

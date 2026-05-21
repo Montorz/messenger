@@ -6,18 +6,18 @@ import (
 	"github.com/google/uuid"
 )
 
-// MessageType определяет тип сообщения
 type MessageType string
 
 const (
-	TypePrivate MessageType = "private" // личное сообщение
-	TypeGroup   MessageType = "group"   // групповое
-	TypeSystem  MessageType = "system"  // системное
-	TypeJoin    MessageType = "join"    // присоединение к группе
-	TypeLeave   MessageType = "leave"   // выход из группы
+	TypePrivate MessageType = "private"
+	TypeGroup   MessageType = "group"
+	TypeSystem  MessageType = "system"
+	TypeJoin    MessageType = "join"
+	TypeLeave   MessageType = "leave"
+	TypeCreate  MessageType = "create_room"
+	TypeList    MessageType = "list_rooms"
 )
 
-// Message структура сообщения
 type Message struct {
 	ID           uuid.UUID   `json:"id"`
 	Type         MessageType `json:"type"`
@@ -29,7 +29,6 @@ type Message struct {
 	CreatedAt    time.Time   `json:"created_at"`
 }
 
-// NewMessage создаёт новое сообщение
 func NewMessage(msgType MessageType, fromUserID uuid.UUID, fromUsername, toChatID, content string) *Message {
 	return &Message{
 		ID:           uuid.New(),
@@ -42,12 +41,10 @@ func NewMessage(msgType MessageType, fromUserID uuid.UUID, fromUsername, toChatI
 	}
 }
 
-// IsPrivateChat проверяет, является ли чат личным
 func IsPrivateChat(chatID string) bool {
 	return len(chatID) > 5 && chatID[:5] == "user:"
 }
 
-// IsGroupChat проверяет, является ли чат групповым
-func IsGroupChat(chatID string) bool {
-	return len(chatID) > 6 && chatID[:6] == "group:"
+func IsRoomChat(chatID string) bool {
+	return len(chatID) > 5 && chatID[:5] == "room:"
 }

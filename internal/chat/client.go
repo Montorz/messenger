@@ -9,7 +9,6 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-// Client представляет подключенного клиента
 type Client struct {
 	ID         uuid.UUID
 	Username   string
@@ -21,12 +20,11 @@ type Client struct {
 }
 
 var upgrader = websocket.Upgrader{
-	CheckOrigin:     func(r *http.Request) bool { return true }, // для разработки
+	CheckOrigin:     func(r *http.Request) bool { return true },
 	ReadBufferSize:  1024,
 	WriteBufferSize: 1024,
 }
 
-// readPump получает сообщения от клиента
 func (c *Client) readPump() {
 	defer func() {
 		c.Hub.unregister <- c
@@ -40,7 +38,6 @@ func (c *Client) readPump() {
 			break
 		}
 
-		// Заполняем отправителя из контекста клиента
 		msg.FromUserID = c.UserID
 		msg.FromUsername = c.Username
 		msg.CreatedAt = time.Now()
@@ -49,7 +46,6 @@ func (c *Client) readPump() {
 	}
 }
 
-// writePump отправляет сообщения клиенту
 func (c *Client) writePump() {
 	ticker := time.NewTicker(30 * time.Second)
 	defer func() {
@@ -79,7 +75,6 @@ func (c *Client) writePump() {
 	}
 }
 
-// ServeWs обрабатывает WebSocket подключения
 func ServeWs(hub *Hub, w http.ResponseWriter, r *http.Request, userID uuid.UUID, username string) {
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
