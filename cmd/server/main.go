@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/tls"
 	"encoding/json"
 	"log"
 	"net/http"
@@ -28,7 +29,7 @@ func main() {
 	}
 	defer appLogger.Close()
 
-	appLogger.LogServerAction("Запуск сервера...")
+	appLogger.LogServerAction("Запуск сервера с TLS...")
 
 	// Инициализируем БД
 	db, err = storage.NewDB("./messenger.db")
@@ -40,7 +41,7 @@ func main() {
 
 	appLogger.Info("База данных подключена")
 
-	// Создаём хаб с передачей БД и логгера
+	// Создаём хаб
 	hub = chat.NewHub(db, appLogger)
 	go hub.Run()
 
@@ -49,21 +50,43 @@ func main() {
 	http.HandleFunc("/api/login", handleLogin)
 	http.HandleFunc("/ws", handleWebSocket)
 
-	// Запускаем сервер
-	server := &http.Server{Addr: ":8080", Handler: nil}
+	// Настройка TLS
+	certFile := "server.crt"
+	keyFile := "server.key"
 
+	// Проверяем наличие сертификатов
+	if _, err := os.Stat(certFile); os.IsNotExist(err) {
+		appLogger.LogServerAction("Сертификат не найден! Сгенерируйте его: openssl req -x509 -newkey rsa:4096 -keyout server.key -out server.crt -days 365 -nodes -subj '/CN=localhost'")
+		log.Fatal("Сертификат не найден")
+	}
+
+	// Создаем TLS конфигурацию (упрощённая для совместимости)
+	tlsConfig := &tls.Config{
+		MinVersion: tls.VersionTLS12,
+		// Curves убрали для совместимости со старыми версиями Go
+	}
+
+	server := &http.Server{
+		Addr:      ":8443", // HTTPS/WSS порт
+		Handler:   nil,
+		TLSConfig: tlsConfig,
+	}
+
+	// Graceful shutdown
 	go func() {
-		appLogger.LogServerAction("Сервер запущен на http://localhost:8080")
-		appLogger.Info("Регистрация: POST /api/register")
-		appLogger.Info("Логин: POST /api/login")
-		appLogger.Info("WebSocket: ws://localhost:8080/ws?token=<jwt>")
-		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		appLogger.LogServerAction("Сервер запущен на https://localhost:8443")
+		appLogger.Info("Регистрация: POST https://localhost:8443/api/register")
+		appLogger.Info("Логин: POST https://localhost:8443/api/login")
+		appLogger.Info("WebSocket Secure: wss://localhost:8443/ws?token=<jwt>")
+		appLogger.Info("Используется самоподписанный сертификат")
+
+		if err := server.ListenAndServeTLS(certFile, keyFile); err != nil && err != http.ErrServerClosed {
 			appLogger.LogError("Запуск сервера", err)
 			log.Fatal("Ошибка сервера:", err)
 		}
 	}()
 
-	// Graceful shutdown
+	// Обработка сигналов
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 	<-sigChan
@@ -180,7 +203,7 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 
 	db.UpdateLastSeen(userID)
-	appLogger.LogUserAction(claims.Username, "WebSocket подключение")
+	appLogger.LogUserAction(claims.Username, "WebSocket Secure подключение")
 
 	chat.ServeWs(hub, w, r, userID, claims.Username)
 }

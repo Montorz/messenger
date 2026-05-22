@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -43,6 +44,9 @@ func main() {
 
 	var token, username string
 
+	// Используем HTTPS для API
+	apiURL := "https://localhost:8443/api"
+
 	if option == "1" {
 		fmt.Print("Имя пользователя: ")
 		scanner.Scan()
@@ -52,7 +56,7 @@ func main() {
 		scanner.Scan()
 		password := scanner.Text()
 
-		token = login(username, password)
+		token = login(apiURL, username, password)
 		if token == "" {
 			log.Fatal("Ошибка входа")
 		}
@@ -65,14 +69,20 @@ func main() {
 		scanner.Scan()
 		password := scanner.Text()
 
-		token = register(username, password)
+		token = register(apiURL, username, password)
 		if token == "" {
 			log.Fatal("Ошибка регистрации")
 		}
 	}
 
-	url := fmt.Sprintf("ws://localhost:8080/ws?token=%s", token)
-	log.Printf("Подключение...")
+	// Настройка WebSocket с TLS
+	// Игнорируем самоподписанный сертификат для разработки
+	websocket.DefaultDialer.TLSClientConfig = &tls.Config{
+		InsecureSkipVerify: true,
+	}
+
+	url := fmt.Sprintf("wss://localhost:8443/ws?token=%s", token)
+	log.Printf("Подключение к %s...", url)
 
 	conn, _, err := websocket.DefaultDialer.Dial(url, nil)
 	if err != nil {
@@ -81,6 +91,7 @@ func main() {
 	defer conn.Close()
 
 	log.Printf("Добро пожаловать, %s!", username)
+	log.Printf("Подключение защищено TLS")
 
 	fmt.Println("\nКОМАНДЫ:")
 	fmt.Println("  просто текст         - отправить сообщение в текущую комнату")
@@ -101,7 +112,7 @@ func main() {
 		for {
 			var msg Message
 			if err := conn.ReadJSON(&msg); err != nil {
-				log.Printf("\nСоединение разорвано")
+				log.Printf("\nСоединение разорвано: %v", err)
 				os.Exit(0)
 			}
 
@@ -181,7 +192,6 @@ func main() {
 		}
 
 		if text != "" && !strings.HasPrefix(text, "/") {
-			// Обычный текст - отправляем в текущую комнату
 			conn.WriteJSON(Message{Type: "group", ToChatID: "", Content: text})
 			fmt.Print("> ")
 		} else if text != "" {
@@ -193,11 +203,18 @@ func main() {
 	}
 }
 
-func register(username, password string) string {
+func register(apiURL, username, password string) string {
 	data := map[string]string{"username": username, "password": password}
 	jsonData, _ := json.Marshal(data)
 
-	resp, err := http.Post("http://localhost:8080/api/register", "application/json", bytes.NewBuffer(jsonData))
+	// Игнорируем самоподписанный сертификат
+	httpClient := &http.Client{
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		},
+	}
+
+	resp, err := httpClient.Post(apiURL+"/register", "application/json", bytes.NewBuffer(jsonData))
 	if err != nil {
 		log.Println("Ошибка регистрации:", err)
 		return ""
@@ -215,11 +232,17 @@ func register(username, password string) string {
 	return authResp.Token
 }
 
-func login(username, password string) string {
+func login(apiURL, username, password string) string {
 	data := map[string]string{"username": username, "password": password}
 	jsonData, _ := json.Marshal(data)
 
-	resp, err := http.Post("http://localhost:8080/api/login", "application/json", bytes.NewBuffer(jsonData))
+	httpClient := &http.Client{
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		},
+	}
+
+	resp, err := httpClient.Post(apiURL+"/login", "application/json", bytes.NewBuffer(jsonData))
 	if err != nil {
 		log.Println("Ошибка входа:", err)
 		return ""
