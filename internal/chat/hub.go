@@ -11,18 +11,25 @@ import (
 	"github.com/google/uuid"
 )
 
+// Hub - центральный управляющий компонент мессенджера
 type Hub struct {
-	clients         map[uuid.UUID]*Client
-	rooms           map[string]map[uuid.UUID]*Client
-	userCurrentRoom map[string]string
-	register        chan *Client
-	unregister      chan *Client
-	broadcast       chan *Message
-	mu              sync.RWMutex
-	db              *storage.DB
-	logger          *logger.Logger
+	// Хранилища данных (защищены мьютексом)
+	clients         map[uuid.UUID]*Client            // Все подключённые клиенты
+	rooms           map[string]map[uuid.UUID]*Client // Комнаты и их участники
+	userCurrentRoom map[string]string                // Текущая комната каждого пользователя
+
+	// Каналы для коммуникации с горутинами
+	register   chan *Client  // Новые клиенты
+	unregister chan *Client  // Отключающиеся клиенты
+	broadcast  chan *Message // Входящие сообщения от клиентов
+
+	// Синхронизация и сервисы
+	mu     sync.RWMutex   // Защита maps
+	db     *storage.DB    // База данных
+	logger *logger.Logger // Логгер
 }
 
+// NewHub - создаёт новый экземпляр Hub
 func NewHub(db *storage.DB, log *logger.Logger) *Hub {
 	return &Hub{
 		clients:         make(map[uuid.UUID]*Client),
@@ -36,20 +43,28 @@ func NewHub(db *storage.DB, log *logger.Logger) *Hub {
 	}
 }
 
+// Run - главный цикл обработки событий хаба
 func (h *Hub) Run() {
 	for {
 		select {
+		// 1: РЕГИСТРАЦИЯ НОВОГО КЛИЕНТА
 		case client := <-h.register:
-			h.mu.Lock()
+			h.mu.Lock() // Блокируем для записи в maps
+
+			// Добавляем клиента в общий список
 			h.clients[client.ID] = client
 			h.logger.Info("Клиент %s (%s) подключился", client.Username, client.ID.String()[:8])
 
+			// Получаем список всех комнат из БД
 			allRooms, _ := h.db.GetAllRooms()
+
 			if len(allRooms) > 0 {
+				// Формируем список комнат
 				roomList := "Доступные комнаты: "
 				for _, r := range allRooms {
 					roomList += r.Name + " "
 				}
+				// Отправляем приветственное сообщение
 				client.Send <- &Message{
 					ID:           uuid.New(),
 					Type:         "system",
@@ -59,6 +74,7 @@ func (h *Hub) Run() {
 					CreatedAt:    time.Now(),
 				}
 			} else {
+				// Нет комнат - подсказываем как создать
 				client.Send <- &Message{
 					ID:           uuid.New(),
 					Type:         "system",
@@ -70,16 +86,22 @@ func (h *Hub) Run() {
 			}
 			h.mu.Unlock()
 
+		// 2: ОТКЛЮЧЕНИЕ КЛИЕНТА
 		case client := <-h.unregister:
 			h.mu.Lock()
+
+			// Проверяем, существует ли клиент
 			if _, ok := h.clients[client.ID]; ok {
+				// Удаляем из общего списка
 				delete(h.clients, client.ID)
 				delete(h.userCurrentRoom, client.Username)
 				h.logger.Info("Клиент %s отключился", client.Username)
 
+				// Удаляем клиента из всех комнат, где он состоял
 				for roomID, members := range h.rooms {
 					if _, ok := members[client.ID]; ok {
 						delete(members, client.ID)
+						// Если комната опустела - удаляем её
 						if len(members) == 0 {
 							delete(h.rooms, roomID)
 						}
@@ -87,12 +109,16 @@ func (h *Hub) Run() {
 				}
 			}
 			h.mu.Unlock()
+
+			// Закрываем канал отправки
 			close(client.Send)
 
+		// 3: ВХОДЯЩЕЕ СООБЩЕНИЕ ОТ КЛИЕНТА
 		case msg := <-h.broadcast:
-			h.logger.Debug("Получено сообщение: type=%s, to=%s, from=%s", msg.Type, msg.ToChatID, msg.FromUsername)
+			h.logger.Debug("Получено сообщение: type=%s, to=%s, from=%s",
+				msg.Type, msg.ToChatID, msg.FromUsername)
 
-			// CREATE ROOM
+			// СОЗДАНИЕ КОМНАТЫ (/create)
 			if msg.Type == "create_room" {
 				roomName := strings.TrimSpace(msg.Content)
 				if roomName == "" {
@@ -107,6 +133,7 @@ func (h *Hub) Run() {
 					continue
 				}
 
+				// Создаём комнату в БД
 				err := h.db.CreateRoom(roomName, msg.FromUsername)
 				if err != nil {
 					h.sendToUser(msg.FromUsername, &Message{
@@ -120,11 +147,13 @@ func (h *Hub) Run() {
 					continue
 				}
 
+				// Автоматически заходим в созданную комнату
 				roomID := "room:" + roomName
 				h.mu.Lock()
 				if _, ok := h.rooms[roomID]; !ok {
 					h.rooms[roomID] = make(map[uuid.UUID]*Client)
 				}
+				// Находим клиента по username
 				var client *Client
 				for _, c := range h.clients {
 					if c.Username == msg.FromUsername {
@@ -139,6 +168,7 @@ func (h *Hub) Run() {
 				}
 				h.mu.Unlock()
 
+				// Подтверждение создания
 				h.sendToUser(msg.FromUsername, &Message{
 					ID:           uuid.New(),
 					Type:         "system",
@@ -148,6 +178,7 @@ func (h *Hub) Run() {
 					CreatedAt:    time.Now(),
 				})
 
+				// Оповещаем всех пользователей о новой комнате
 				h.broadcastToAll(&Message{
 					ID:           uuid.New(),
 					Type:         "system",
@@ -159,7 +190,7 @@ func (h *Hub) Run() {
 				continue
 			}
 
-			// JOIN ROOM
+			// ВХОД В КОМНАТУ (/join)
 			if msg.Type == "join_room" {
 				roomName := strings.TrimSpace(msg.Content)
 				if roomName == "" {
@@ -174,6 +205,7 @@ func (h *Hub) Run() {
 					continue
 				}
 
+				// Проверяем существование комнаты
 				allRooms, _ := h.db.GetAllRooms()
 				roomExists := false
 				for _, r := range allRooms {
@@ -195,8 +227,10 @@ func (h *Hub) Run() {
 					continue
 				}
 
+				// Добавляем в БД
 				h.db.JoinRoom(roomName, msg.FromUsername)
 
+				// Добавляем в память
 				roomID := "room:" + roomName
 				h.mu.Lock()
 				if _, ok := h.rooms[roomID]; !ok {
@@ -216,6 +250,7 @@ func (h *Hub) Run() {
 				}
 				h.mu.Unlock()
 
+				// Подтверждение входа
 				h.sendToUser(msg.FromUsername, &Message{
 					ID:           uuid.New(),
 					Type:         "system",
@@ -225,11 +260,12 @@ func (h *Hub) Run() {
 					CreatedAt:    time.Now(),
 				})
 
+				// Отправляем историю комнаты
 				go h.sendHistoryToUser(msg.FromUsername, roomID)
 				continue
 			}
 
-			// LEAVE ROOM - ИСПРАВЛЕНО!
+			// ВЫХОД ИЗ КОМНАТЫ (/leave)
 			if msg.Type == "leave_room" {
 				roomName := strings.TrimSpace(msg.Content)
 				if roomName == "" {
@@ -250,7 +286,7 @@ func (h *Hub) Run() {
 				roomID := "room:" + roomName
 
 				h.mu.Lock()
-				// Удаляем пользователя из памяти
+				// Удаляем из памяти
 				if members, ok := h.rooms[roomID]; ok {
 					var clientID uuid.UUID
 					for id, client := range h.clients {
@@ -285,7 +321,7 @@ func (h *Hub) Run() {
 				continue
 			}
 
-			// LIST ROOMS
+			// СПИСОК ВСЕХ КОМНАТ (/rooms)
 			if msg.Type == "list_rooms" {
 				allRooms, err := h.db.GetAllRooms()
 				if err != nil {
@@ -306,7 +342,8 @@ func (h *Hub) Run() {
 					for i, r := range allRooms {
 						roomNames[i] = r.Name
 					}
-					content := fmt.Sprintf("Доступные комнаты (%d): %s\nИспользуйте /join <название> чтобы войти", len(allRooms), strings.Join(roomNames, ", "))
+					content := fmt.Sprintf("Доступные комнаты (%d): %s\nИспользуйте /join <название> чтобы войти",
+						len(allRooms), strings.Join(roomNames, ", "))
 					h.sendToUser(msg.FromUsername, &Message{
 						ID:           uuid.New(),
 						Type:         "system",
@@ -319,7 +356,7 @@ func (h *Hub) Run() {
 				continue
 			}
 
-			// CURRENT ROOM
+			// ПОКАЗАТЬ ТЕКУЩУЮ КОМНАТУ (/room)
 			if msg.Type == "current_room" {
 				h.mu.RLock()
 				currentRoom := h.userCurrentRoom[msg.FromUsername]
@@ -347,7 +384,7 @@ func (h *Hub) Run() {
 				continue
 			}
 
-			// GET USERS
+			// СПИСОК ОНЛАЙН ПОЛЬЗОВАТЕЛЕЙ (/users)
 			if msg.Type == "get_users" {
 				h.mu.RLock()
 				var users []string
@@ -369,12 +406,13 @@ func (h *Hub) Run() {
 				continue
 			}
 
-			// REGULAR MESSAGE TO CURRENT ROOM
+			// ОБЫЧНОЕ СООБЩЕНИЕ В ТЕКУЩУЮ КОМНАТУ (просто текст)
 			if msg.Type == "group" && msg.ToChatID == "" {
 				h.mu.RLock()
 				currentRoomName, hasRoom := h.userCurrentRoom[msg.FromUsername]
 				h.mu.RUnlock()
 
+				// Проверяем, находится ли пользователь в какой-либо комнате
 				if !hasRoom {
 					h.sendToUser(msg.FromUsername, &Message{
 						ID:           uuid.New(),
@@ -390,37 +428,162 @@ func (h *Hub) Run() {
 				roomID := "room:" + currentRoomName
 				msg.ToChatID = roomID
 
+				// Сохраняем сообщение в БД (в отдельной горутине, чтобы не блокировать)
 				go func(m *Message) {
 					if err := h.db.SaveMessage(m.FromUserID, m.ToChatID, m.Content, nil); err != nil {
 						h.logger.Error("Ошибка сохранения: %v", err)
 					}
 				}(msg)
 
+				// Отправляем всем участникам комнаты, КРОМЕ отправителя
 				h.mu.RLock()
 				members, ok := h.rooms[roomID]
 				h.mu.RUnlock()
 
 				if ok {
 					for _, client := range members {
+						// Пропускаем отправителя (свои сообщения не присылаем)
+						if client.Username == msg.FromUsername {
+							continue
+						}
 						select {
 						case client.Send <- msg:
 						default:
+							// Канал заполнен - клиент недоступен
 						}
 					}
 				}
 				continue
 			}
 
-			// PRIVATE MESSAGE
+			// ИСТОРИЯ ЛИЧНОЙ ПЕРЕПИСКИ (/history username)
+			if msg.Type == "history" {
+				targetUsername := strings.TrimSpace(msg.Content)
+				if targetUsername == "" {
+					h.sendToUser(msg.FromUsername, &Message{
+						ID:           uuid.New(),
+						Type:         "system",
+						ToChatID:     "user:" + msg.FromUsername,
+						Content:      "Укажите имя пользователя: /history <username>",
+						FromUsername: "system",
+						CreatedAt:    time.Now(),
+					})
+					continue
+				}
+
+				// Проверяем существование пользователя
+				_, err := h.db.GetUserByUsername(targetUsername)
+				if err != nil {
+					h.sendToUser(msg.FromUsername, &Message{
+						ID:           uuid.New(),
+						Type:         "system",
+						ToChatID:     "user:" + msg.FromUsername,
+						Content:      fmt.Sprintf("Пользователь '%s' не найден", targetUsername),
+						FromUsername: "system",
+						CreatedAt:    time.Now(),
+					})
+					continue
+				}
+
+				// Получаем историю из БД
+				history, err := h.db.GetPrivateChatHistory(msg.FromUsername, targetUsername, 50)
+				if err != nil {
+					h.logger.Error("Ошибка получения истории: %v", err)
+					h.sendToUser(msg.FromUsername, &Message{
+						ID:           uuid.New(),
+						Type:         "system",
+						ToChatID:     "user:" + msg.FromUsername,
+						Content:      fmt.Sprintf("Ошибка получения истории: %v", err),
+						FromUsername: "system",
+						CreatedAt:    time.Now(),
+					})
+					continue
+				}
+
+				if len(history) == 0 {
+					h.sendToUser(msg.FromUsername, &Message{
+						ID:           uuid.New(),
+						Type:         "system",
+						ToChatID:     "user:" + msg.FromUsername,
+						Content:      fmt.Sprintf("История переписки с %s пуста", targetUsername),
+						FromUsername: "system",
+						CreatedAt:    time.Now(),
+					})
+					continue
+				}
+
+				// Заголовок истории
+				h.sendToUser(msg.FromUsername, &Message{
+					ID:           uuid.New(),
+					Type:         "system",
+					ToChatID:     "user:" + msg.FromUsername,
+					Content:      fmt.Sprintf("----- История переписки с %s (последние %d сообщений) -----", targetUsername, len(history)),
+					FromUsername: "system",
+					CreatedAt:    time.Now(),
+				})
+
+				// Каждое сообщение истории
+				for _, msgHistory := range history {
+					createdAt, ok := msgHistory["created_at"].(time.Time)
+					if !ok {
+						continue
+					}
+					fromUsername, ok := msgHistory["from_username"].(string)
+					if !ok {
+						continue
+					}
+					content, ok := msgHistory["content"].(string)
+					if !ok {
+						continue
+					}
+
+					timeStr := createdAt.Format("02.01.2006 15:04:05")
+
+					// Определяем направление сообщения
+					var direction string
+					if fromUsername == msg.FromUsername {
+						direction = "->" // Исходящее
+					} else {
+						direction = "<-" // Входящее
+					}
+
+					historyMsg := &Message{
+						ID:           uuid.New(),
+						Type:         "system",
+						FromUserID:   uuid.New(),
+						FromUsername: fromUsername,
+						ToChatID:     "user:" + msg.FromUsername,
+						Content:      fmt.Sprintf("[%s] %s %s: %s", timeStr, fromUsername, direction, content),
+						CreatedAt:    createdAt,
+					}
+					h.sendToUser(msg.FromUsername, historyMsg)
+				}
+
+				// Разделитель
+				h.sendToUser(msg.FromUsername, &Message{
+					ID:           uuid.New(),
+					Type:         "system",
+					ToChatID:     "user:" + msg.FromUsername,
+					Content:      "-----------------------------------------------------",
+					FromUsername: "system",
+					CreatedAt:    time.Now(),
+				})
+				continue
+			}
+
+			// ЛИЧНОЕ СООБЩЕНИЕ (/msg username текст)
 			if IsPrivateChat(msg.ToChatID) {
+				// Извлекаем имя получателя из "user:username"
 				username := msg.ToChatID[5:]
 
+				// Сохраняем в БД (отдельная горутина)
 				go func(m *Message) {
 					if err := h.db.SaveMessage(m.FromUserID, m.ToChatID, m.Content, nil); err != nil {
 						h.logger.Error("Ошибка сохранения: %v", err)
 					}
 				}(msg)
 
+				// Отправляем получателю
 				h.sendToUser(username, msg)
 				continue
 			}
@@ -428,6 +591,7 @@ func (h *Hub) Run() {
 	}
 }
 
+// sendToUser - отправляет сообщение конкретному пользователю по имени
 func (h *Hub) sendToUser(username string, msg *Message) {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
@@ -436,7 +600,9 @@ func (h *Hub) sendToUser(username string, msg *Message) {
 		if client.Username == username {
 			select {
 			case client.Send <- msg:
+				// Отправлено успешно
 			default:
+				// Канал заполнен - клиент не успевает читать
 				h.logger.Warn("Клиент %s недоступен", username)
 			}
 			return
@@ -444,6 +610,7 @@ func (h *Hub) sendToUser(username string, msg *Message) {
 	}
 }
 
+// broadcastToAll - отправляет сообщение всем подключённым клиентам
 func (h *Hub) broadcastToAll(msg *Message) {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
@@ -451,27 +618,82 @@ func (h *Hub) broadcastToAll(msg *Message) {
 	for _, client := range h.clients {
 		select {
 		case client.Send <- msg:
+			// Отправлено
 		default:
+			// Клиент недоступен - пропускаем
 		}
 	}
 }
 
+// sendHistoryToUser - отправляет пользователю историю сообщений комнаты
 func (h *Hub) sendHistoryToUser(username, chatID string) {
+	// Получаем историю из БД (последние 50 сообщений)
 	history, err := h.db.GetChatHistory(chatID, 50)
 	if err != nil {
+		h.logger.Error("Ошибка получения истории: %v", err)
 		return
 	}
 
+	// Если истории нет - сообщаем об этом
+	if len(history) == 0 {
+		h.sendToUser(username, &Message{
+			ID:           uuid.New(),
+			Type:         "system",
+			ToChatID:     "user:" + username,
+			Content:      "История сообщений пуста.",
+			FromUsername: "system",
+			CreatedAt:    time.Now(),
+		})
+		return
+	}
+
+	// Заголовок
+	h.sendToUser(username, &Message{
+		ID:           uuid.New(),
+		Type:         "system",
+		ToChatID:     "user:" + username,
+		Content:      fmt.Sprintf("----- История комнаты (последние %d сообщений) ----", len(history)),
+		FromUsername: "system",
+		CreatedAt:    time.Now(),
+	})
+
+	// Каждое сообщение
 	for _, msg := range history {
+		// Извлекаем поля с проверкой типов
+		createdAt, ok := msg["created_at"].(time.Time)
+		if !ok {
+			continue
+		}
+		fromUsername, ok := msg["from_username"].(string)
+		if !ok {
+			continue
+		}
+		content, ok := msg["content"].(string)
+		if !ok {
+			continue
+		}
+
+		timeStr := createdAt.Format("02.01.2006 15:04:05")
+
 		historyMsg := &Message{
 			ID:           uuid.New(),
 			Type:         "system",
-			FromUserID:   uuid.MustParse(msg["from_user_id"].(string)),
-			FromUsername: msg["from_username"].(string),
+			FromUserID:   uuid.New(),
+			FromUsername: fromUsername,
 			ToChatID:     chatID,
-			Content:      msg["content"].(string),
-			CreatedAt:    msg["created_at"].(time.Time),
+			Content:      fmt.Sprintf("[%s] %s: %s", timeStr, fromUsername, content),
+			CreatedAt:    createdAt,
 		}
 		h.sendToUser(username, historyMsg)
 	}
+
+	// Разделитель
+	h.sendToUser(username, &Message{
+		ID:           uuid.New(),
+		Type:         "system",
+		ToChatID:     "user:" + username,
+		Content:      "-----------------------------------------------------",
+		FromUsername: "system",
+		CreatedAt:    time.Now(),
+	})
 }
